@@ -1,0 +1,106 @@
+variables:
+  sql_warehouse_id:
+    description: Databricks SQL warehouse used to refresh the monitoring dashboard.
+    default: ""
+  regime_dashboard_id:
+    description: Databricks SQL dashboard id for the regime monitoring dashboard.
+    default: ""
+  alert_email:
+    description: Optional email recipient for job failure notifications.
+    default: ""
+  spark_version:
+    description: Databricks Runtime version for notebook tasks.
+    default: 14.3.x-scala2.12
+  node_type_id:
+    description: Cloud-specific Databricks node type for notebook tasks.
+    default: i3.xlarge
+
+resources:
+  jobs:
+    regime_detection_and_prediction_pipeline:
+      name: regime_detection_and_prediction_pipeline
+      max_concurrent_runs: 1
+      schedule:
+        quartz_cron_expression: "0 0 7 ? * MON-FRI"
+        timezone_id: America/Sao_Paulo
+        pause_status: UNPAUSED
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+        no_alert_for_skipped_runs: true
+      job_clusters:
+        - job_cluster_key: regime_detection_cluster
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            autoscale:
+              min_workers: 1
+              max_workers: 4
+            spark_env_vars:
+              PYTHONPATH: /Workspace/${workspace.file_path}/src
+      tasks:
+        - task_key: ingest_data
+          job_cluster_key: regime_detection_cluster
+          notebook_task:
+            notebook_path: ../notebooks/01_ingest_data
+        - task_key: build_silver_tables
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: ingest_data
+          notebook_task:
+            notebook_path: ../notebooks/02_build_silver_tables
+        - task_key: build_gold_features
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: build_silver_tables
+          notebook_task:
+            notebook_path: ../notebooks/03_build_gold_features
+        - task_key: normal_condition_model
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: build_gold_features
+          notebook_task:
+            notebook_path: ../notebooks/04_normal_condition_model
+        - task_key: detection_model
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: normal_condition_model
+          notebook_task:
+            notebook_path: ../notebooks/05_detection_model
+        - task_key: prediction_labels
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: detection_model
+          notebook_task:
+            notebook_path: ../notebooks/06_create_prediction_labels
+        - task_key: train_prediction_models
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: prediction_labels
+          notebook_task:
+            notebook_path: ../notebooks/07_train_prediction_models
+        - task_key: backtest_and_metrics
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: train_prediction_models
+          notebook_task:
+            notebook_path: ../notebooks/08_backtest_and_metrics
+        - task_key: dashboard_outputs
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: backtest_and_metrics
+          notebook_task:
+            notebook_path: ../notebooks/09_dashboard_outputs
+        - task_key: operational_alerts
+          job_cluster_key: regime_detection_cluster
+          depends_on:
+            - task_key: dashboard_outputs
+          notebook_task:
+            notebook_path: ../notebooks/10_operational_alerts
+        - task_key: refresh_sql_dashboard
+          depends_on:
+            - task_key: operational_alerts
+          sql_task:
+            warehouse_id: ${var.sql_warehouse_id}
+            dashboard:
+              dashboard_id: ${var.regime_dashboard_id}
