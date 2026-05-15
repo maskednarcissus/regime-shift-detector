@@ -1,0 +1,23 @@
+name: Regime Detection Monitoring
+description: Databricks SQL dashboard query set for regime detection, prediction, backtest, feature importance, and quality monitoring.
+warehouse_config_key: dashboard.sql_warehouse_id
+refresh:
+  source: workflows/regime_detection_job.yml
+  task_key: refresh_sql_dashboard
+queries:
+  - name: Current status by strategy
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Daily equity and overlay timeseries
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Backtest metric summary
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Prediction model metrics
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Top prediction feature drivers
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Prediction diagnostics
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Data quality failures
+    source_file: dashboards/regime_detection_dashboard.sql
+  - name: Operational alerts
+    source_file: dashboards/regime_detection_dashboard.sql
