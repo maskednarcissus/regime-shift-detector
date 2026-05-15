@@ -108,6 +108,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "hmm_max_iter": 25,
         "hmm_transition_prior": 2.0,
         "train_test_split_date": "2022-01-01",
+        "prediction_decision_threshold": 0.5,
+        "high_precision_threshold": 0.8,
         "model_version": "mvp-0.1",
         "feature_version": "mvp-0.1",
     },

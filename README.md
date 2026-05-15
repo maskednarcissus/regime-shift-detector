@@ -48,6 +48,18 @@ online trailing-window mean-shift detector, so each date is scored using only in
 date. Set `regime_state_model: gaussian_mixture` to use the previous hidden-state fallback; the default `hmm`
 path estimates Gaussian emissions and a transition matrix directly.
 
+Prediction thresholds:
+
+```yaml
+models:
+  prediction_decision_threshold: 0.5
+  high_precision_threshold: 0.8
+```
+
+`high_precision_threshold` carries forward the working classifier pattern from `Teste.ipynb`: keep the standard
+50% decision cut for broad recall, but also emit high-confidence 60d regime-change signals and false-positive
+diagnostics at the stricter threshold.
+
 Production data-quality controls:
 
 ```yaml
@@ -89,6 +101,8 @@ run and can send webhook/email notifications when credentials are configured. Th
 config/pipeline.yml          Small set of paths, table names, and model params
 notebooks/                   Databricks notebook entrypoints
 src/regime_detection/        Reusable MVP pipeline code
+src/regime_detection/classification.py
+                             Binary classifier metrics, confusion diagnostics, and probability thresholds
 workflows/                   Databricks workflow/job definition stub
 dashboards/                  Databricks SQL dashboard query definitions
 data/raw/                    Local CSV input drop zone

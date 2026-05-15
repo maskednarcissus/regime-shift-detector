@@ -20,6 +20,10 @@ SELECT
   prob_regime_survival_30d,
   prob_regime_survival_60d,
   prob_regime_survival_90d,
+  regime_change_60d_signal,
+  high_precision_regime_change_60d_signal,
+  prediction_decision_threshold,
+  high_precision_threshold,
   recommended_risk_multiplier,
   dominant_stress_driver,
   model_version
@@ -86,6 +90,7 @@ SELECT
   model,
   target,
   bucket,
+  threshold,
   observed_rate,
   predicted_probability,
   row_count,

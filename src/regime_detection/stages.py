@@ -148,10 +148,14 @@ def create_prediction_training_set(config_path: str = "config/pipeline.yml") -> 
 def train_prediction_stage(config_path: str = "config/pipeline.yml") -> None:
     config = load_config(config_path)
     training = load_processed_table(_table(config, "regime_prediction_training_set"), config)
+    decision_threshold = float(config["models"].get("prediction_decision_threshold", 0.5))
+    high_precision_threshold = float(config["models"].get("high_precision_threshold", 0.8))
     outputs, metrics = train_prediction_models(
         training,
         model_version=config["models"]["model_version"],
         feature_version=config["models"]["feature_version"],
+        decision_threshold=decision_threshold,
+        high_precision_threshold=high_precision_threshold,
     )
     _save_and_check(outputs, config, "regime_model_outputs", "train_prediction_stage")
     if not metrics.empty:
@@ -168,6 +172,8 @@ def train_prediction_stage(config_path: str = "config/pipeline.yml") -> None:
         outputs,
         model_version=config["models"]["model_version"],
         feature_version=config["models"]["feature_version"],
+        decision_threshold=decision_threshold,
+        high_precision_threshold=high_precision_threshold,
     )
     if not diagnostics.empty:
         _save_and_check(diagnostics, config, "regime_prediction_diagnostics", "train_prediction_stage")

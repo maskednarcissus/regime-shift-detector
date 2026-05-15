@@ -4,14 +4,26 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import average_precision_score, brier_score_loss, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from .classification import (
+    binary_classification_metric_rows,
+    calibration_diagnostic_rows,
+    confusion_diagnostic_rows,
+    normalized_thresholds,
+)
 from .constants import PREDICTION_FEATURES
 
 
-def train_prediction_models(training_set: pd.DataFrame, model_version: str, feature_version: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def train_prediction_models(
+    training_set: pd.DataFrame,
+    model_version: str,
+    feature_version: str,
+    decision_threshold: float = 0.5,
+    high_precision_threshold: float = 0.8,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = training_set.copy()
     for column in PREDICTION_FEATURES:
         if column not in df.columns:
@@ -20,27 +32,32 @@ def train_prediction_models(training_set: pd.DataFrame, model_version: str, feat
 
     outputs = df[["date", "strategy_name"]].copy()
     metrics: list[dict[str, object]] = []
+    thresholds = normalized_thresholds((decision_threshold, high_precision_threshold))
 
     for horizon in (30, 60, 90):
         target = f"regime_change_next_{horizon}d"
         prob_col = f"prob_regime_change_{horizon}d"
         outputs[prob_col] = _fit_predict_probability(df, target, model="gbm")
-        metrics.extend(_classification_metrics(df[target], outputs[prob_col], f"gbm_{horizon}d"))
+        metrics.extend(_classification_metrics(df[target], outputs[prob_col], f"gbm_{horizon}d", thresholds=thresholds))
 
     outputs["prob_regime_change_60d_logistic"] = _fit_predict_probability(df, "regime_change_next_60d", model="logistic")
     outputs["prob_regime_change_60d_gbm"] = outputs["prob_regime_change_60d"]
     logistic_hazard = _fit_predict_probability(df, "regime_break_today", model="logistic")
     outputs["hazard_of_regime_change_logistic"] = logistic_hazard
-    survival_outputs, survival_metrics = _fit_predict_cox_survival(df, logistic_hazard)
+    survival_outputs, survival_metrics = _fit_predict_cox_survival(df, logistic_hazard, thresholds=thresholds)
     for column, values in survival_outputs.items():
         outputs[column] = values
-    metrics.extend(_classification_metrics(df["regime_break_today"], outputs["hazard_of_regime_change"], "hazard_break_today"))
+    metrics.extend(_classification_metrics(df["regime_break_today"], outputs["hazard_of_regime_change"], "hazard_break_today", thresholds=thresholds))
     metrics.extend(survival_metrics)
     outputs["predicted_alert_level"] = pd.cut(
         outputs["prob_regime_change_60d"],
         bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
         labels=["green", "yellow", "orange", "red"],
     ).astype(str)
+    outputs["regime_change_60d_signal"] = (outputs["prob_regime_change_60d"] >= decision_threshold).astype(int)
+    outputs["high_precision_regime_change_60d_signal"] = (outputs["prob_regime_change_60d"] >= high_precision_threshold).astype(int)
+    outputs["prediction_decision_threshold"] = decision_threshold
+    outputs["high_precision_threshold"] = high_precision_threshold
     outputs["model_version"] = model_version
     outputs["feature_version"] = feature_version
     return outputs, pd.DataFrame(metrics)
@@ -77,6 +94,8 @@ def build_prediction_diagnostics(
     model_outputs: pd.DataFrame,
     model_version: str,
     feature_version: str,
+    decision_threshold: float = 0.5,
+    high_precision_threshold: float = 0.8,
 ) -> pd.DataFrame:
     df = training_set.merge(model_outputs, on=["date", "strategy_name"], how="left")
     targets = {
@@ -89,13 +108,15 @@ def build_prediction_diagnostics(
         "cox_survival_90d": ("regime_change_next_90d", "prob_regime_change_90d_survival"),
     }
     rows: list[dict[str, object]] = []
+    thresholds = normalized_thresholds((decision_threshold, high_precision_threshold))
     for model_name, (target, probability) in targets.items():
         if target not in df.columns or probability not in df.columns:
             continue
         y_true = df[target].fillna(0).astype(int)
         y_prob = pd.to_numeric(df[probability], errors="coerce").fillna(0.0).clip(0.0, 1.0)
-        rows.extend(_confusion_diagnostic_rows(model_name, target, y_true, y_prob, model_version, feature_version))
-        rows.extend(_calibration_diagnostic_rows(model_name, target, y_true, y_prob, model_version, feature_version))
+        for threshold in thresholds:
+            rows.extend(confusion_diagnostic_rows(y_true, y_prob, model_name, target, threshold, model_version, feature_version))
+        rows.extend(calibration_diagnostic_rows(y_true, y_prob, model_name, target, model_version, feature_version))
     return pd.DataFrame(rows)
 
 
@@ -115,90 +136,6 @@ def _fit_predict_probability(df: pd.DataFrame, target: str, model: str) -> np.nd
 
     estimator.fit(df.loc[train_mask, PREDICTION_FEATURES], y.loc[train_mask])
     return estimator.predict_proba(df[PREDICTION_FEATURES])[:, 1]
-
-
-def _confusion_diagnostic_rows(
-    model_name: str,
-    target: str,
-    y_true: pd.Series,
-    y_prob: pd.Series,
-    model_version: str,
-    feature_version: str,
-) -> list[dict[str, object]]:
-    y_pred = (y_prob >= 0.5).astype(int)
-    values = {
-        "true_positive": int(((y_true == 1) & (y_pred == 1)).sum()),
-        "false_positive": int(((y_true == 0) & (y_pred == 1)).sum()),
-        "true_negative": int(((y_true == 0) & (y_pred == 0)).sum()),
-        "false_negative": int(((y_true == 1) & (y_pred == 0)).sum()),
-    }
-    return [
-        _diagnostic_row(
-            artifact_type="confusion_matrix",
-            model_name=model_name,
-            target=target,
-            bucket=metric_name,
-            observed_rate=np.nan,
-            predicted_probability=np.nan,
-            row_count=value,
-            model_version=model_version,
-            feature_version=feature_version,
-        )
-        for metric_name, value in values.items()
-    ]
-
-
-def _calibration_diagnostic_rows(
-    model_name: str,
-    target: str,
-    y_true: pd.Series,
-    y_prob: pd.Series,
-    model_version: str,
-    feature_version: str,
-    bins: int = 5,
-) -> list[dict[str, object]]:
-    frame = pd.DataFrame({"y": y_true, "p": y_prob})
-    frame["bin"] = pd.cut(frame["p"], bins=np.linspace(0.0, 1.0, bins + 1), include_lowest=True)
-    rows: list[dict[str, object]] = []
-    for interval, group in frame.groupby("bin", observed=True):
-        rows.append(
-            _diagnostic_row(
-                artifact_type="calibration_curve",
-                model_name=model_name,
-                target=target,
-                bucket=str(interval),
-                observed_rate=float(group["y"].mean()) if len(group) else 0.0,
-                predicted_probability=float(group["p"].mean()) if len(group) else 0.0,
-                row_count=int(len(group)),
-                model_version=model_version,
-                feature_version=feature_version,
-            )
-        )
-    return rows
-
-
-def _diagnostic_row(
-    artifact_type: str,
-    model_name: str,
-    target: str,
-    bucket: str,
-    observed_rate: float,
-    predicted_probability: float,
-    row_count: int,
-    model_version: str,
-    feature_version: str,
-) -> dict[str, object]:
-    return {
-        "artifact_type": artifact_type,
-        "model": model_name,
-        "target": target,
-        "bucket": bucket,
-        "observed_rate": observed_rate,
-        "predicted_probability": predicted_probability,
-        "row_count": row_count,
-        "model_version": model_version,
-        "feature_version": feature_version,
-    }
 
 
 def _univariate_importance_rows(
@@ -303,7 +240,11 @@ def _importance_row(
     return row
 
 
-def _fit_predict_cox_survival(df: pd.DataFrame, fallback_hazard: np.ndarray) -> tuple[dict[str, object], list[dict[str, object]]]:
+def _fit_predict_cox_survival(
+    df: pd.DataFrame,
+    fallback_hazard: np.ndarray,
+    thresholds: tuple[float, ...] | list[float] = (0.5,),
+) -> tuple[dict[str, object], list[dict[str, object]]]:
     duration, event = _time_to_next_regime_break(df)
     train_mask = df.get("train_test_split", "train").eq("train").to_numpy()
     if train_mask.sum() < 30 or event[train_mask].sum() < 2:
@@ -358,6 +299,7 @@ def _fit_predict_cox_survival(df: pd.DataFrame, fallback_hazard: np.ndarray) -> 
                 df[f"regime_change_next_{horizon}d"],
                 outputs[f"prob_regime_change_{horizon}d_survival"],
                 f"cox_survival_{horizon}d",
+                thresholds=thresholds,
             )
         )
     return outputs, metrics
@@ -523,29 +465,10 @@ def _concordance_index(duration: np.ndarray, event: np.ndarray, risk: np.ndarray
     return float(concordant / permissible)
 
 
-def _classification_metrics(y_true: pd.Series, y_prob: pd.Series, name: str) -> list[dict[str, object]]:
-    y = y_true.fillna(0).astype(int)
-    y_hat = (pd.Series(y_prob, index=y.index) >= 0.5).astype(int)
-    rows: list[dict[str, object]] = []
-    if y.nunique() == 2:
-        rows.append({"model": name, "metric_name": "auc_roc", "metric_value": roc_auc_score(y, y_prob)})
-        rows.append({"model": name, "metric_name": "pr_auc", "metric_value": average_precision_score(y, y_prob)})
-        rows.append({"model": name, "metric_name": "precision_at_50pct", "metric_value": precision_score(y, y_hat, zero_division=0)})
-        rows.append({"model": name, "metric_name": "recall_at_50pct", "metric_value": recall_score(y, y_hat, zero_division=0)})
-        rows.append({"model": name, "metric_name": "f1_at_50pct", "metric_value": f1_score(y, y_hat, zero_division=0)})
-    rows.append({"model": name, "metric_name": "brier_score", "metric_value": brier_score_loss(y, y_prob)})
-    rows.append({"model": name, "metric_name": "calibration_error_5bin", "metric_value": _calibration_error(y, y_prob)})
-    return rows
-
-
-def _calibration_error(y_true: pd.Series, y_prob: pd.Series, bins: int = 5) -> float:
-    frame = pd.DataFrame({"y": y_true, "p": y_prob})
-    frame["bin"] = pd.cut(frame["p"], bins=np.linspace(0.0, 1.0, bins + 1), include_lowest=True)
-    grouped = frame.groupby("bin", observed=True)
-    total = len(frame)
-    if total == 0:
-        return 0.0
-    error = 0.0
-    for _, group in grouped:
-        error += len(group) / total * abs(float(group["y"].mean()) - float(group["p"].mean()))
-    return float(error)
+def _classification_metrics(
+    y_true: pd.Series,
+    y_prob: pd.Series | np.ndarray,
+    name: str,
+    thresholds: tuple[float, ...] | list[float] = (0.5,),
+) -> list[dict[str, object]]:
+    return binary_classification_metric_rows(y_true, y_prob, name, thresholds=thresholds)
